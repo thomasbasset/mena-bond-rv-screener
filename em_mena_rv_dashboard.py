@@ -1,5 +1,5 @@
 # em_mena_rv_dashboard.py
-# IMPORTANT: This is a pure .py file. Do NOT paste any ```python fences into the file.
+# Run: streamlit run em_mena_rv_dashboard.py
 
 import re
 from pathlib import Path
@@ -20,6 +20,19 @@ import plotly.express as px
 st.set_page_config(page_title="MENA Bond RV (Z-spreads)", layout="wide")
 
 # -----------------------------
+# Hide the left menu/sidebar completely
+# -----------------------------
+st.markdown(
+    """
+    <style>
+    section[data-testid="stSidebar"] {display: none;}
+    div[data-testid="collapsedControl"] {display: none;}
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
+# -----------------------------
 # Paths
 # -----------------------------
 def find_project_root(start: Path) -> Path:
@@ -31,7 +44,7 @@ def find_project_root(start: Path) -> Path:
     return start.resolve().parent
 
 
-APP_DIR = Path(__file__).resolve().parent
+APP_DIR = Path(__file__).resolve().parent if "__file__" in globals() else Path.cwd()
 PROJECT_ROOT = find_project_root(APP_DIR)
 DATA_DIR = PROJECT_ROOT / "data"
 OUTPUTS_DIR = PROJECT_ROOT / "outputs"
@@ -69,7 +82,6 @@ SCOPE_MAP = {
         "MTVD",
         "TAQAUH",
         "RPCUH",
-        # "Qatar gres (if applicable)" — common tokens:
         "QATARGRES", "QATARGRS", "QATGRES", "QGAS",
     },
 }
@@ -138,6 +150,55 @@ def parse_ticker_meta(t: str):
     country = ISSUER_TO_COUNTRY.get(issuer, "OTHER")
     maturity = parse_maturity_from_ticker(raw)
     return {"ticker": raw, "issuer": issuer, "country": country, "maturity": maturity}
+
+
+# -----------------------------
+# Bloomberg-style coupon fraction formatting (DISPLAY ONLY)
+# -----------------------------
+_SUP = str.maketrans("0123456789+-()", "⁰¹²³⁴⁵⁶⁷⁸⁹⁺⁻⁽⁾")
+_SUB = str.maketrans("0123456789+-()", "₀₁₂₃₄₅₆₇₈₉₊₋₍₎")
+
+_VULGAR = {
+    (1, 2): "½",
+    (1, 3): "⅓",
+    (2, 3): "⅔",
+    (1, 4): "¼",
+    (3, 4): "¾",
+    (1, 5): "⅕",
+    (2, 5): "⅖",
+    (3, 5): "⅗",
+    (4, 5): "⅘",
+    (1, 6): "⅙",
+    (5, 6): "⅚",
+    (1, 8): "⅛",
+    (3, 8): "⅜",
+    (5, 8): "⅝",
+    (7, 8): "⅞",
+}
+
+def _to_sup(s: str) -> str:
+    return str(s).translate(_SUP)
+
+def _to_sub(s: str) -> str:
+    return str(s).translate(_SUB)
+
+_COUPON_FRAC_RE = re.compile(r"(?<!\.)\b(\d+)\s+(\d+)\s*/\s*(\d+)\b(?!\s*/\s*\d)")
+
+def format_coupon_superscript(ticker: str) -> str:
+    txt = str(ticker)
+
+    def _repl(m):
+        whole = m.group(1)
+        num = int(m.group(2))
+        den = int(m.group(3))
+        if (num, den) in _VULGAR:
+            return f"{whole}{_VULGAR[(num, den)]}"
+        return f"{whole}{_to_sup(num)}⁄{_to_sub(den)}"
+
+    return _COUPON_FRAC_RE.sub(_repl, txt)
+
+def display_label_map(tickers):
+    return {t: format_coupon_superscript(t) for t in tickers}
 
 
 # -----------------------------
@@ -212,25 +273,17 @@ MAT_BUCKETS = {
 }
 
 
-def maturity_and_scope_filter(
-    meta: pd.DataFrame,
-    df: pd.DataFrame,
-    asof: pd.Timestamp,
-    bucket_name: str,
-    scope_choice: str,
-):
+def maturity_and_scope_filter(meta: pd.DataFrame, df: pd.DataFrame, asof: pd.Timestamp, bucket_name: str, scope_choice: str):
     lo, hi = MAT_BUCKETS[bucket_name]
     m = meta.dropna(subset=["maturity"]).copy()
 
-    # scope filter
     if scope_choice != "ALL":
         m = m[m["issuer"].apply(lambda x: issuer_in_scope(x, scope_choice))]
 
-    # maturity filter
     m["ytm"] = m["maturity"].apply(lambda x: ytm_years(x, asof))
     m = m[(m["ytm"] >= lo) & (m["ytm"] <= hi)]
 
-    tickers_sorted = sorted(m["ticker"].unique().tolist())  # alphabetical
+    tickers_sorted = sorted(m["ticker"].unique().tolist())
     return df[df["ticker"].isin(tickers_sorted)].copy(), m.copy(), tickers_sorted
 
 
@@ -248,10 +301,6 @@ def compute_raw_last(df: pd.DataFrame, window: int, min_periods: int, min_obs: i
 
 
 def compute_resid_last(df: pd.DataFrame, window: int, min_periods: int, min_obs: int, asof: pd.Timestamp, winsor_p: float):
-    """
-    Residual z-score = z-score of residuals from rolling regression:
-        zspread_w ~ const + country_median(date,country)
-    """
     d = df[df["date"] <= asof].copy()
     d["zspread_w"] = d.groupby("ticker")["zspread"].transform(lambda x: winsorize_series(x, p=winsor_p))
 
@@ -276,7 +325,6 @@ def compute_resid_last(df: pd.DataFrame, window: int, min_periods: int, min_obs:
 
         try:
             rols = RollingOLS(y, X, window=window, min_nobs=min_periods).fit()
-            # predicted = b0 + b1*country_med, aligned on g.index
             pred = (rols.params["const"] + rols.params["country_med"] * g["country_med"])
             resid = y - pred
             d.loc[g.index, "resid"] = resid
@@ -291,75 +339,143 @@ def compute_resid_last(df: pd.DataFrame, window: int, min_periods: int, min_obs:
 
 
 # -----------------------------
-# Heatmap matrix (single-bond zscore differences)
+# Pair matrix for directional coloring (FULL SYMMETRIC)
+# - compute once (i<j), then mirror to (j,i) so full matrix shows
+# - diagonal NaN (blank)
+# Color depends on ROW action:
+#   - row bond is BUY => +|Z| (green)
+#   - row bond is SELL => -|Z| (red)
 # -----------------------------
-def z_diff_matrix(z: pd.Series, tickers_sorted: list):
-    z = z.dropna()
-    keep = [t for t in tickers_sorted if t in z.index]
-    z = z.loc[keep]
-    if z.shape[0] < 2:
-        return pd.DataFrame()
-    arr = z.values.astype(float)
-    M = arr.reshape(-1, 1) - arr.reshape(1, -1)  # row i - col j
-    return pd.DataFrame(M, index=z.index, columns=z.index)
+def pair_spread_z_matrix_directional_full(
+    df_bucket: pd.DataFrame,
+    tickers_sorted: list,
+    asof: pd.Timestamp,
+    window: int,
+    min_periods: int,
+):
+    wide = (
+        df_bucket[df_bucket["date"] <= asof]
+        .pivot_table(index="date", columns="ticker", values="zspread", aggfunc="last")
+        .sort_index()
+    )
+
+    n = len(tickers_sorted)
+    if n < 2:
+        return pd.DataFrame(), None
+
+    M = np.full((n, n), np.nan, dtype=float)  # signed for color (+ green, - red)
+    CD = np.empty((n, n), dtype=object)       # hover: [buy, sell, cur, mean, std, signed_z, abs_z]
+
+    for i in range(n):
+        CD[i, i] = ["", "", np.nan, np.nan, np.nan, np.nan, np.nan]
+
+    for i in range(n):
+        x = tickers_sorted[i]
+        if x not in wide.columns:
+            continue
+
+        for j in range(i + 1, n):
+            y = tickers_sorted[j]
+            if y not in wide.columns:
+                continue
+
+            spread_ts = (wide[y] - wide[x]).dropna()
+            if spread_ts.shape[0] < min_periods:
+                continue
+
+            mu = spread_ts.rolling(window, min_periods=min_periods).mean().iloc[-1]
+            sd = spread_ts.rolling(window, min_periods=min_periods).std(ddof=0).iloc[-1]
+            cur = spread_ts.iloc[-1]
+
+            if pd.isna(mu) or pd.isna(sd) or sd == 0 or pd.isna(cur):
+                continue
+
+            z = float((cur - mu) / sd)
+            z_abs = abs(z)
+
+            # Recommendation (spread = y - x):
+            # z >= 0 => BUY x, SELL y
+            # z <  0 => BUY y, SELL x
+            if z >= 0:
+                buy, sell = x, y
+                cur_sb = float(cur)     # (sell - buy) = (y - x)
+                mu_sb = float(mu)
+            else:
+                buy, sell = y, x
+                cur_sb = float(-cur)    # flip to (sell - buy)
+                mu_sb = float(-mu)
+
+            buy_fmt = format_coupon_superscript(buy)
+            sell_fmt = format_coupon_superscript(sell)
+            cd_common = [buy_fmt, sell_fmt, cur_sb, mu_sb, float(sd), float(z), float(z_abs)]
+
+            CD[i, j] = cd_common
+            CD[j, i] = cd_common
+
+            # ✅ COLOR RULE: use COLUMN bond action (not row)
+            # Cell (i,j): column bond is y
+            col_j_is_buy = (y == buy)
+            M[i, j] = z_abs if col_j_is_buy else -z_abs
+
+            # Mirror cell (j,i): column bond is x
+            col_i_is_buy = (x == buy)
+            M[j, i] = z_abs if col_i_is_buy else -z_abs
+
+    mat = pd.DataFrame(M, index=tickers_sorted, columns=tickers_sorted)
+    return mat, CD
 
 
+
 # -----------------------------
-# Plotly interactive heatmap
+# Plotly heatmap for directional coloring
 # -----------------------------
-def plotly_z_heatmap(mat: pd.DataFrame, title: str, vmax: float):
+def plotly_z_heatmap_directional(mat: pd.DataFrame, customdata, title: str, vmax: float, key: str):
     if mat is None or mat.empty or mat.shape[0] < 2:
         st.info("Not enough bonds in this selection.")
         return
 
-    colors = px.colors.diverging.RdYlGn[::-1]  # negative green, positive red
+    st.markdown(f"#### {title}")
 
-    # mat[y, x] = Z(y) - Z(x): positive means "Sell y / Buy x"
+    labels = display_label_map(mat.index.tolist())
+    x_disp = [labels.get(x, x) for x in mat.columns]
+    y_disp = [labels.get(y, y) for y in mat.index]
+
+    colors = px.colors.diverging.RdYlGn[::-1]  # + => green, - => red
+
     fig = go.Figure(
         data=go.Heatmap(
-            z=np.round(mat.values.astype(float), 2),  # 2 decimals in cells (requested)
-            x=mat.columns,  # Buy
-            y=mat.index,    # Sell
+            z=np.round(mat.values.astype(float), 2),
+            x=x_disp,
+            y=y_disp,
             zmin=-vmax,
             zmax=vmax,
             colorscale=colors,
-            colorbar=dict(title="Z-score"),
+            showscale=False,
+            customdata=customdata,
             hovertemplate=(
-                "<b>Buy:</b> %{x}<br>"
-                "<b>Sell:</b> %{y}<br>"
-                "Z-score: <b>%{z:.2f}</b><extra></extra>"
+                "<b>Buy:</b> %{customdata[0]}<br>"
+                "<b>Sell:</b> %{customdata[1]}<br>"
+                "<b>Current spread (Sell-Buy):</b> %{customdata[2]:.2f}<br>"
+                "<b>Avg spread:</b> %{customdata[3]:.2f}<br>"
+                "<b>Std:</b> %{customdata[4]:.2f}<br>"
+                "<b>|Z|:</b> %{customdata[6]:.2f}<extra></extra>"
             ),
         )
     )
 
+    fig.update_xaxes(constrain="domain")
+    fig.update_yaxes(scaleanchor="x", scaleratio=1)
+
     fig.update_layout(
-        title=dict(text=title, x=0.02, xanchor="left"),
-        margin=dict(l=10, r=10, t=60, b=10),
-        height=650,
+        margin=dict(l=10, r=10, t=10, b=10),
+        height=900,
         hovermode="closest",
     )
 
-    fig.update_xaxes(
-        tickangle=90,
-        showspikes=True,
-        spikemode="across",
-        spikesnap="cursor",
-        spikedash="solid",
-        spikecolor="rgba(0,0,0,0.45)",
-        spikethickness=1,
-        tickfont=dict(size=9),
-    )
-    fig.update_yaxes(
-        showspikes=True,
-        spikemode="across",
-        spikesnap="cursor",
-        spikedash="solid",
-        spikecolor="rgba(0,0,0,0.45)",
-        spikethickness=1,
-        tickfont=dict(size=9),
-    )
+    fig.update_xaxes(tickangle=90, tickfont=dict(size=9))
+    fig.update_yaxes(tickfont=dict(size=9))
 
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(fig, use_container_width=True, key=key)
 
 
 # -----------------------------
@@ -375,15 +491,6 @@ def build_rv_pairs_table(
     min_periods: int,
     topn: int = 10,
 ):
-    """
-    Buy = cheaper (lower z), Sell = richer (higher z)
-
-    Current spread = zspread(Sell) - zspread(Buy)
-    Average spread = mean of historical (Sell-Buy) spread
-    Z score = Z(Sell) - Z(Buy)
-
-    OUTPUT is ranked by Z score (desc), as requested.
-    """
     if last is None or last.empty or z_col not in last.columns:
         return pd.DataFrame()
 
@@ -402,7 +509,6 @@ def build_rv_pairs_table(
 
     pairs["current_spread"] = pairs["zspread_sell"] - pairs["zspread_buy"]
 
-    # average spread from history
     wide = (
         df_bucket[df_bucket["date"] <= asof]
         .pivot_table(index="date", columns="ticker", values="zspread", aggfunc="last")
@@ -425,7 +531,6 @@ def build_rv_pairs_table(
 
     pairs = pairs.dropna(subset=["average_spread", "current_spread", "z_score"]).copy()
 
-    # de-dup unordered pairs
     pairs["pair_key"] = pairs.apply(lambda r: "||".join(sorted([r["ticker_buy"], r["ticker_sell"]])), axis=1)
     pairs = pairs.sort_values("z_score", ascending=False).drop_duplicates("pair_key")
 
@@ -437,19 +542,72 @@ def build_rv_pairs_table(
         {
             "Buy": top["ticker_buy"].values,
             "Sell": top["ticker_sell"].values,
-            "Current spread": top["current_spread"].values,
-            "Average spread": top["average_spread"].values,
-            "Z score": top["z_score"].values,
+            "Current Spread": top["current_spread"].values,
+            "Average Spread": top["average_spread"].values,
+            "Z-score": top["z_score"].values,
         }
     )
 
-    for c in ["Current spread", "Average spread", "Z score"]:
+    for c in ["Current Spread", "Average Spread", "Z-score"]:
         out[c] = pd.to_numeric(out[c], errors="coerce").round(2)
 
-    # final rank: biggest Z score first (requested)
-    out = out.sort_values("Z score", ascending=False).head(topn).reset_index(drop=True)
+    out = out.sort_values("Z-score", ascending=False).head(topn).reset_index(drop=True)
+
+    out["Buy"] = out["Buy"].map(format_coupon_superscript)
+    out["Sell"] = out["Sell"].map(format_coupon_superscript)
 
     return out
+
+
+def style_rv_table(df: pd.DataFrame) -> pd.io.formats.style.Styler:
+    NOMURA_RED = "#d32f2f"
+
+    sty = df.style
+    sty = sty.set_table_styles(
+        [
+            {
+                "selector": "th.blank",
+                "props": [
+                    ("background-color", NOMURA_RED),
+                    ("color", "white"),
+                    ("text-align", "center !important"),
+                ],
+            },
+            {
+                "selector": "th.col_heading",
+                "props": [
+                    ("background-color", NOMURA_RED),
+                    ("color", "white"),
+                    ("font-weight", "700"),
+                    ("text-align", "center !important"),
+                    ("white-space", "nowrap"),
+                ],
+            },
+            {
+                "selector": "th.row_heading",
+                "props": [
+                    ("background-color", "white"),
+                    ("color", "black"),
+                    ("font-weight", "500"),
+                    ("text-align", "center !important"),
+                    ("white-space", "nowrap"),
+                ],
+            },
+            {
+                "selector": "td",
+                "props": [
+                    ("text-align", "center !important"),
+                    ("font-size", "12px"),
+                    ("padding", "6px 10px"),
+                    ("white-space", "nowrap"),
+                    ("vertical-align", "middle"),
+                ],
+            },
+            {"selector": "table", "props": [("width", "100%")]},
+        ],
+        overwrite=True,
+    )
+    return sty
 
 
 def show_rv_pairs_table(
@@ -462,36 +620,26 @@ def show_rv_pairs_table(
     min_periods: int,
 ):
     st.markdown("### Top 10 RV trades")
+
     tbl = build_rv_pairs_table(df_bucket, last, z_col, tickers_sorted, asof, window, min_periods, topn=10)
     if tbl.empty:
         st.info("Not enough data to build RV pair trades in this selection.")
-    else:
-        st.dataframe(tbl, use_container_width=True)
+        return
+
+    tbl = tbl.reset_index(drop=True)
+    tbl.index = np.arange(1, len(tbl) + 1)
+
+    sty = (
+        style_rv_table(tbl)
+        .format({"Current Spread": "{:.2f}", "Average Spread": "{:.2f}", "Z-score": "{:.2f}"})
+    )
+
+    st.table(sty)
 
 
 # -----------------------------
-# Sidebar
+# Load (cached)
 # -----------------------------
-with st.sidebar:
-    st.header("Paths")
-    st.code(f"PROJECT_ROOT = {PROJECT_ROOT}")
-    st.code(f"DATA_DIR     = {DATA_DIR}")
-    st.code(f"OUTPUTS_DIR  = {OUTPUTS_DIR}")
-    st.code(f"DEFAULT_EXCEL= {DEFAULT_EXCEL}")
-
-    st.header("Data")
-    excel_path = st.text_input("Excel file path", value=str(DEFAULT_EXCEL))
-    sheet = st.text_input("Sheet name", value="Time_Series_Z_Spreads")
-
-    st.header("Short-history params")
-    window = st.slider("Rolling window (days)", 10, 120, 20, step=5)
-    min_periods = st.slider("Min periods (rolling)", 5, 60, 10, step=1)
-    min_obs = st.slider("Min obs per bond", 10, 120, 25, step=1)
-    winsor_p = st.slider("Winsor tail p", 0.0, 0.05, 0.01, step=0.005)
-
-    st.header("Heatmap scale")
-    vmax = st.slider("Color scale (max |Z diff|)", 0.5, 6.0, 3.0, step=0.5)
-
 @st.cache_data(show_spinner=False)
 def load_all(excel_path: str, sheet: str):
     p = Path(excel_path)
@@ -504,50 +652,84 @@ def load_all(excel_path: str, sheet: str):
     df["date"] = pd.to_datetime(df["date"])
     return df, meta
 
+
 # -----------------------------
 # Header
 # -----------------------------
 st.title("MENA Bonds RV Screener")
 
 # -----------------------------
-# Load
+# Parameters (collapsible) + Diagnostics inside
 # -----------------------------
-try:
-    df, meta = load_all(excel_path, sheet)
-except Exception as e:
-    st.error("Excel load failed.")
-    st.exception(e)
-    st.stop()
+with st.expander("Parameters", expanded=False):
+    excel_path = st.text_input("Excel file path", value=str(DEFAULT_EXCEL))
+    sheet = st.text_input("Sheet name", value="Time_Series_Z_Spreads")
 
-if df.empty:
-    st.error("Parsed dataframe is empty.")
-    st.stop()
+    st.markdown("#### Short-history params")
+    window = st.slider("Rolling window (days)", 10, 120, 20, step=5)
+    min_periods = st.slider("Min periods (rolling)", 5, 60, 10, step=1)
+    min_obs = st.slider("Min obs per bond", 10, 120, 25, step=1)
+    winsor_p = st.slider("Winsor tail p", 0.0, 0.05, 0.01, step=0.005)
 
-asof_default = df["date"].max()
-asof = st.sidebar.date_input("As-of date", value=asof_default.date())
-asof = pd.to_datetime(asof)
+    st.markdown("#### Heatmap scale")
+    vmax = st.slider("Color scale (max |Z diff|)", 0.5, 6.0, 3.0, step=0.5)
 
-# -----------------------------
-# Diagnostics
-# -----------------------------
-st.markdown("#### Diagnostics")
-c1, c2, c3 = st.columns(3)
-with c1:
-    st.metric("Total bonds", int(df["ticker"].nunique()))
-with c2:
-    st.metric("As-of", str(asof.date()))
-with c3:
-    st.metric("Data rows", int(df.shape[0]))
+    try:
+        df, meta = load_all(excel_path, sheet)
+    except Exception as e:
+        st.error("Excel load failed.")
+        st.exception(e)
+        st.stop()
+
+    if df.empty:
+        st.error("Parsed dataframe is empty.")
+        st.stop()
+
+    asof_default = df["date"].max()
+    asof_in = st.date_input("As-of date", value=asof_default.date())
+    asof = pd.to_datetime(asof_in)
+
+    st.markdown("#### Diagnostics")
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        st.metric("Total bonds", int(df["ticker"].nunique()))
+    with c2:
+        st.metric("As-of", str(asof.date()))
+    with c3:
+        st.metric("Data rows", int(df.shape[0]))
+
+# Defaults if expander not opened this run
+if "df" not in globals() or "meta" not in globals() or "asof" not in globals():
+    excel_path = str(DEFAULT_EXCEL)
+    sheet = "Time_Series_Z_Spreads"
+    window = 20
+    min_periods = 10
+    min_obs = 25
+    winsor_p = 0.01
+    vmax = 3.0
+
+    try:
+        df, meta = load_all(excel_path, sheet)
+    except Exception as e:
+        st.error("Excel load failed.")
+        st.exception(e)
+        st.stop()
+
+    if df.empty:
+        st.error("Parsed dataframe is empty.")
+        st.stop()
+
+    asof = pd.to_datetime(df["date"].max())
 
 # -----------------------------
 # Tabs
 # -----------------------------
 tab_raw, tab_resid, tab_coint = st.tabs(["Raw Z", "Residual Z", "Cointegration Z (proxy)"])
 
+
 def header_row_with_filters(key_prefix: str, default_bucket: str = "5Y area", default_scope: str = "ALL"):
     left, r1, r2 = st.columns([3, 1, 1])
     with left:
-        # removed "All MENA Bonds RV Screener" (requested)
         st.write("")
     with r1:
         scope_choice = st.selectbox(
@@ -565,6 +747,7 @@ def header_row_with_filters(key_prefix: str, default_bucket: str = "5Y area", de
         )
     return scope_choice, bucket_choice
 
+
 # -----------------------------
 # Raw tab
 # -----------------------------
@@ -575,10 +758,15 @@ with tab_raw:
     df_bucket, meta_bucket, tickers_sorted = maturity_and_scope_filter(meta, df, asof, bucket_choice, scope_choice)
 
     last = compute_raw_last(df_bucket, window, min_periods, min_obs, asof, winsor_p)
-    z = last.set_index("ticker")["raw_z"] if not last.empty else pd.Series(dtype=float)
-    mat = z_diff_matrix(z, tickers_sorted)
 
-    plotly_z_heatmap(mat, title=f"Raw Z-score Matrix — {bucket_choice}", vmax=vmax)
+    mat, cd = pair_spread_z_matrix_directional_full(df_bucket, tickers_sorted, asof, window, min_periods)
+    plotly_z_heatmap_directional(
+        mat, cd,
+        title=f"Raw Z-score Matrix — {bucket_choice}",
+        vmax=vmax,
+        key=f"hm_raw_{scope_choice}_{bucket_choice}_{asof.date()}_{window}_{min_periods}_{min_obs}_{winsor_p}_{vmax}",
+    )
+
     show_rv_pairs_table(df_bucket, last, "raw_z", tickers_sorted, asof, window, min_periods)
 
 # -----------------------------
@@ -592,11 +780,14 @@ with tab_resid:
 
     last = compute_resid_last(df_bucket, window, min_periods, min_obs, asof, winsor_p)
 
-    # IMPORTANT: use resid_z everywhere (table + heatmap). This fixes "no z score in table".
-    z = last.set_index("ticker")["resid_z"] if not last.empty else pd.Series(dtype=float)
-    mat = z_diff_matrix(z, tickers_sorted)
+    mat, cd = pair_spread_z_matrix_directional_full(df_bucket, tickers_sorted, asof, window, min_periods)
+    plotly_z_heatmap_directional(
+        mat, cd,
+        title=f"Residual Z-score Matrix — {bucket_choice}",
+        vmax=vmax,
+        key=f"hm_residual_{scope_choice}_{bucket_choice}_{asof.date()}_{window}_{min_periods}_{min_obs}_{winsor_p}_{vmax}",
+    )
 
-    plotly_z_heatmap(mat, title=f"Residual Z-score Matrix — {bucket_choice}", vmax=vmax)
     show_rv_pairs_table(df_bucket, last, "resid_z", tickers_sorted, asof, window, min_periods)
 
 # -----------------------------
@@ -611,8 +802,14 @@ with tab_coint:
     df_bucket, meta_bucket, tickers_sorted = maturity_and_scope_filter(meta, df, asof, bucket_choice, scope_choice)
 
     last = compute_raw_last(df_bucket, window, min_periods, min_obs, asof, winsor_p)
-    z = last.set_index("ticker")["raw_z"] if not last.empty else pd.Series(dtype=float)
-    mat = z_diff_matrix(z, tickers_sorted)
 
-    plotly_z_heatmap(mat, title=f"Cointegration (proxy) Z-score Matrix — {bucket_choice}", vmax=vmax)
+    mat, cd = pair_spread_z_matrix_directional_full(df_bucket, tickers_sorted, asof, window, min_periods)
+    plotly_z_heatmap_directional(
+        mat, cd,
+        title=f"Cointegration Z-score Matrix — {bucket_choice}",
+        vmax=vmax,
+        key=f"hm_cointegration_{scope_choice}_{bucket_choice}_{asof.date()}_{window}_{min_periods}_{min_obs}_{winsor_p}_{vmax}",
+    )
+
     show_rv_pairs_table(df_bucket, last, "raw_z", tickers_sorted, asof, window, min_periods)
+
