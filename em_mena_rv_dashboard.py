@@ -559,7 +559,7 @@ def build_rv_pairs_table(
     return out
 
 
-def style_rv_table(df: pd.DataFrame) -> pd.io.formats.style.Styler:
+def style_rv_table(df: pd.DataFrame):
     NOMURA_RED = "#d32f2f"
 
     sty = df.style
