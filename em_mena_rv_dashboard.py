@@ -57,24 +57,32 @@ DEFAULT_EXCEL = DATA_DIR / "RV_Model_Raw_Data.xlsx"
 SCOPE_MAP = {
     "ALL": None,
     "IG": {
-        "ISRAEL", "ISR",
+        "ISRAEL",
+        "ISR",
         "KSA",
         "KUWIB",
-        "QATAR", "QAT",
+        "QATAR",
+        "QAT",
         "UAE",
         "OMAN",
         "ARAMCO",
         "QPETRO",
         "RASGAS",
-        "ADNOCM", "ADNOC",
+        "ADNOCM",
+        "ADNOC",
     },
     "HY": {
-        "EGYPT", "EGYP",
+        "EGYPT",
+        "EGYP",
         "ESCWPC",
         "SWEHAN",
-        "JORDAN", "JOR",
-        "MOROC", "MAR",
-        "BHRAIN", "BHR", "BAHRAIN",
+        "JORDAN",
+        "JOR",
+        "MOROC",
+        "MAR",
+        "BHRAIN",
+        "BHR",
+        "BAHRAIN",
     },
     "QUASI": {
         "DPWDU",
@@ -82,7 +90,10 @@ SCOPE_MAP = {
         "MTVD",
         "TAQAUH",
         "RPCUH",
-        "QATARGRES", "QATARGRS", "QATGRES", "QGAS",
+        "QATARGRES",
+        "QATARGRS",
+        "QATGRES",
+        "QGAS",
     },
 }
 
@@ -156,7 +167,7 @@ def parse_ticker_meta(t: str):
 # Bloomberg-style coupon fraction formatting (DISPLAY ONLY)
 # -----------------------------
 _SUP = str.maketrans("0123456789+-()", "⁰¹²³⁴⁵⁶⁷⁸⁹⁺⁻⁽⁾")
-_SUB = str.maketrans("0123456789+-()", "₀₁₂₃₄₅₆₇₈₉₊₋₍₎")
+_SUB = str.maketrans("0123456789+-()", "₀₁₂₃⁴₅₆₇₈₉₊₋₍₎")
 
 _VULGAR = {
     (1, 2): "½",
@@ -176,13 +187,17 @@ _VULGAR = {
     (7, 8): "⅞",
 }
 
+
 def _to_sup(s: str) -> str:
     return str(s).translate(_SUP)
+
 
 def _to_sub(s: str) -> str:
     return str(s).translate(_SUB)
 
+
 _COUPON_FRAC_RE = re.compile(r"(?<!\.)\b(\d+)\s+(\d+)\s*/\s*(\d+)\b(?!\s*/\s*\d)")
+
 
 def format_coupon_superscript(ticker: str) -> str:
     txt = str(ticker)
@@ -196,6 +211,7 @@ def format_coupon_superscript(ticker: str) -> str:
         return f"{whole}{_to_sup(num)}⁄{_to_sub(den)}"
 
     return _COUPON_FRAC_RE.sub(_repl, txt)
+
 
 def display_label_map(tickers):
     return {t: format_coupon_superscript(t) for t in tickers}
@@ -273,7 +289,9 @@ MAT_BUCKETS = {
 }
 
 
-def maturity_and_scope_filter(meta: pd.DataFrame, df: pd.DataFrame, asof: pd.Timestamp, bucket_name: str, scope_choice: str):
+def maturity_and_scope_filter(
+    meta: pd.DataFrame, df: pd.DataFrame, asof: pd.Timestamp, bucket_name: str, scope_choice: str
+):
     lo, hi = MAT_BUCKETS[bucket_name]
     m = meta.dropna(subset=["maturity"]).copy()
 
@@ -290,7 +308,9 @@ def maturity_and_scope_filter(meta: pd.DataFrame, df: pd.DataFrame, asof: pd.Tim
 # -----------------------------
 # Z computations
 # -----------------------------
-def compute_raw_last(df: pd.DataFrame, window: int, min_periods: int, min_obs: int, asof: pd.Timestamp, winsor_p: float):
+def compute_raw_last(
+    df: pd.DataFrame, window: int, min_periods: int, min_obs: int, asof: pd.Timestamp, winsor_p: float
+):
     d = df[df["date"] <= asof].copy()
     d["zspread_w"] = d.groupby("ticker")["zspread"].transform(lambda x: winsorize_series(x, p=winsor_p))
     d["raw_z"] = d.groupby("ticker")["zspread_w"].transform(lambda x: rolling_zscore(x, window, min_periods))
@@ -300,16 +320,13 @@ def compute_raw_last(df: pd.DataFrame, window: int, min_periods: int, min_obs: i
     return last[last["n_obs"] >= min_obs]
 
 
-def compute_resid_last(df: pd.DataFrame, window: int, min_periods: int, min_obs: int, asof: pd.Timestamp, winsor_p: float):
+def compute_resid_last(
+    df: pd.DataFrame, window: int, min_periods: int, min_obs: int, asof: pd.Timestamp, winsor_p: float
+):
     d = df[df["date"] <= asof].copy()
     d["zspread_w"] = d.groupby("ticker")["zspread"].transform(lambda x: winsorize_series(x, p=winsor_p))
 
-    country_factor = (
-        d.groupby(["country", "date"])["zspread_w"]
-        .median()
-        .rename("country_med")
-        .reset_index()
-    )
+    country_factor = d.groupby(["country", "date"])["zspread_w"].median().rename("country_med").reset_index()
     d = d.merge(country_factor, on=["country", "date"], how="left")
 
     d = d.sort_values(["ticker", "date"]).copy()
@@ -342,9 +359,15 @@ def compute_resid_last(df: pd.DataFrame, window: int, min_periods: int, min_obs:
 # Pair matrix for directional coloring (FULL SYMMETRIC)
 # - compute once (i<j), then mirror to (j,i) so full matrix shows
 # - diagonal NaN (blank)
-# Color depends on ROW action:
-#   - row bond is BUY => +|Z| (green)
-#   - row bond is SELL => -|Z| (red)
+# Color depends on COLUMN bond action:
+#   - column bond is BUY  => +|Z| (green)
+#   - column bond is SELL => -|Z| (red)
+#
+# IMPORTANT: to match your trading convention:
+# We define spread_ts = x - y
+# If current < mean (z<0) => SELL x / BUY y
+# If current > mean (z>0) => BUY x / SELL y
+# Then we color each cell by the action of the COLUMN bond.
 # -----------------------------
 def pair_spread_z_matrix_directional_full(
     df_bucket: pd.DataFrame,
@@ -364,7 +387,7 @@ def pair_spread_z_matrix_directional_full(
         return pd.DataFrame(), None
 
     M = np.full((n, n), np.nan, dtype=float)  # signed for color (+ green, - red)
-    CD = np.empty((n, n), dtype=object)       # hover: [buy, sell, cur, mean, std, signed_z, abs_z]
+    CD = np.empty((n, n), dtype=object)       # hover: [buy, sell, cur_sb, mu_sb, std, signed_z, abs_z]
 
     for i in range(n):
         CD[i, i] = ["", "", np.nan, np.nan, np.nan, np.nan, np.nan]
@@ -379,7 +402,8 @@ def pair_spread_z_matrix_directional_full(
             if y not in wide.columns:
                 continue
 
-            spread_ts = (wide[y] - wide[x]).dropna()
+            # DEFINE SPREAD AS x - y (matches your examples)
+            spread_ts = (wide[x] - wide[y]).dropna()
             if spread_ts.shape[0] < min_periods:
                 continue
 
@@ -393,17 +417,18 @@ def pair_spread_z_matrix_directional_full(
             z = float((cur - mu) / sd)
             z_abs = abs(z)
 
-            # Recommendation (spread = y - x):
+            # Recommendation for spread = x - y:
             # z >= 0 => BUY x, SELL y
-            # z <  0 => BUY y, SELL x
+            # z <  0 => SELL x, BUY y
             if z >= 0:
                 buy, sell = x, y
-                cur_sb = float(cur)     # (sell - buy) = (y - x)
-                mu_sb = float(mu)
+                # for hover we always show spread as (Sell - Buy)
+                cur_sb = float(-cur)  # y - x
+                mu_sb  = float(-mu)
             else:
                 buy, sell = y, x
-                cur_sb = float(-cur)    # flip to (sell - buy)
-                mu_sb = float(-mu)
+                cur_sb = float(cur)   # x - y = (Sell - Buy) because Sell=x, Buy=y
+                mu_sb  = float(mu)
 
             buy_fmt = format_coupon_superscript(buy)
             sell_fmt = format_coupon_superscript(sell)
@@ -412,7 +437,7 @@ def pair_spread_z_matrix_directional_full(
             CD[i, j] = cd_common
             CD[j, i] = cd_common
 
-            # ✅ COLOR RULE: use COLUMN bond action (not row)
+            # COLOR RULE: use COLUMN bond action
             # Cell (i,j): column bond is y
             col_j_is_buy = (y == buy)
             M[i, j] = z_abs if col_j_is_buy else -z_abs
@@ -425,9 +450,8 @@ def pair_spread_z_matrix_directional_full(
     return mat, CD
 
 
-
 # -----------------------------
-# Plotly heatmap for directional coloring
+# Plotly heatmap for directional coloring (NO LEGEND)
 # -----------------------------
 def plotly_z_heatmap_directional(mat: pd.DataFrame, customdata, title: str, vmax: float, key: str):
     if mat is None or mat.empty or mat.shape[0] < 2:
@@ -450,7 +474,7 @@ def plotly_z_heatmap_directional(mat: pd.DataFrame, customdata, title: str, vmax
             zmin=-vmax,
             zmax=vmax,
             colorscale=colors,
-            showscale=False,
+            showscale=False,  # remove legend
             customdata=customdata,
             hovertemplate=(
                 "<b>Buy:</b> %{customdata[0]}<br>"
@@ -479,83 +503,83 @@ def plotly_z_heatmap_directional(mat: pd.DataFrame, customdata, title: str, vmax
 
 
 # -----------------------------
-# Top 10 RV trades (pair table)
+# Top 10 RV trades (FROM MATRIX LOGIC)
+# - computes all pairs using same spread definition (x - y)
+# - determines Buy/Sell from z sign
+# - ranks by |Z|
 # -----------------------------
-def build_rv_pairs_table(
+def build_rv_pairs_from_matrix_logic(
     df_bucket: pd.DataFrame,
-    last: pd.DataFrame,
-    z_col: str,
     tickers_sorted: list,
     asof: pd.Timestamp,
     window: int,
     min_periods: int,
     topn: int = 10,
-):
-    if last is None or last.empty or z_col not in last.columns:
-        return pd.DataFrame()
-
-    s = last[["ticker", "zspread", z_col]].copy().rename(columns={z_col: "z"})
-    s = s[s["ticker"].isin(tickers_sorted)].dropna(subset=["z", "zspread"]).copy()
-    if s.shape[0] < 2:
-        return pd.DataFrame()
-
-    buy = s.assign(_k=1)
-    sell = s.assign(_k=1)
-    pairs = buy.merge(sell, on="_k", suffixes=("_buy", "_sell")).drop(columns=["_k"])
-    pairs = pairs[pairs["ticker_buy"] != pairs["ticker_sell"]].copy()
-
-    pairs["z_score"] = pairs["z_sell"] - pairs["z_buy"]
-    pairs = pairs[pairs["z_score"] > 0].copy()
-
-    pairs["current_spread"] = pairs["zspread_sell"] - pairs["zspread_buy"]
-
+) -> pd.DataFrame:
     wide = (
         df_bucket[df_bucket["date"] <= asof]
         .pivot_table(index="date", columns="ticker", values="zspread", aggfunc="last")
         .sort_index()
     )
 
-    avg_spreads = []
-    for _, r in pairs.iterrows():
-        b = r["ticker_buy"]
-        s_ = r["ticker_sell"]
-        if b not in wide.columns or s_ not in wide.columns:
-            avg_spreads.append(np.nan)
-            continue
-        spread_ts = (wide[s_] - wide[b]).dropna()
-        if spread_ts.empty:
-            avg_spreads.append(np.nan)
-            continue
-        avg_spreads.append(float(spread_ts.tail(max(min_periods, window)).mean()))
-    pairs["average_spread"] = avg_spreads
-
-    pairs = pairs.dropna(subset=["average_spread", "current_spread", "z_score"]).copy()
-
-    pairs["pair_key"] = pairs.apply(lambda r: "||".join(sorted([r["ticker_buy"], r["ticker_sell"]])), axis=1)
-    pairs = pairs.sort_values("z_score", ascending=False).drop_duplicates("pair_key")
-
-    top = pairs.head(topn).copy()
-    if top.empty:
+    rows = []
+    n = len(tickers_sorted)
+    if n < 2:
         return pd.DataFrame()
 
-    out = pd.DataFrame(
-        {
-            "Buy": top["ticker_buy"].values,
-            "Sell": top["ticker_sell"].values,
-            "Current Spread": top["current_spread"].values,
-            "Average Spread": top["average_spread"].values,
-            "Z-score": top["z_score"].values,
-        }
-    )
+    for i in range(n):
+        x = tickers_sorted[i]
+        if x not in wide.columns:
+            continue
 
-    for c in ["Current Spread", "Average Spread", "Z-score"]:
-        out[c] = pd.to_numeric(out[c], errors="coerce").round(2)
+        for j in range(i + 1, n):
+            y = tickers_sorted[j]
+            if y not in wide.columns:
+                continue
 
-    out = out.sort_values("Z-score", ascending=False).head(topn).reset_index(drop=True)
+            spread_ts = (wide[x] - wide[y]).dropna()  # x - y
+            if spread_ts.shape[0] < min_periods:
+                continue
 
-    out["Buy"] = out["Buy"].map(format_coupon_superscript)
-    out["Sell"] = out["Sell"].map(format_coupon_superscript)
+            mu = spread_ts.rolling(window, min_periods=min_periods).mean().iloc[-1]
+            sd = spread_ts.rolling(window, min_periods=min_periods).std(ddof=0).iloc[-1]
+            cur = spread_ts.iloc[-1]
 
+            if pd.isna(mu) or pd.isna(sd) or sd == 0 or pd.isna(cur):
+                continue
+
+            z = float((cur - mu) / sd)
+            z_abs = abs(z)
+
+            # Rule for x - y:
+            # z >= 0 => BUY x, SELL y
+            # z <  0 => SELL x, BUY y
+            if z >= 0:
+                buy, sell = x, y
+                cur_sb = float(-cur)  # Sell-Buy = y-x
+                mu_sb = float(-mu)
+            else:
+                buy, sell = y, x
+                cur_sb = float(cur)   # Sell-Buy = x-y since Sell=x, Buy=y
+                mu_sb = float(mu)
+
+            rows.append(
+                {
+                    "Buy": format_coupon_superscript(buy),
+                    "Sell": format_coupon_superscript(sell),
+                    "Current Spread": round(cur_sb, 2),
+                    "Average Spread": round(mu_sb, 2),
+                    "Z-score": round(z_abs, 2),
+                    "_pair_key": "||".join(sorted([x, y])),
+                }
+            )
+
+    if not rows:
+        return pd.DataFrame()
+
+    out = pd.DataFrame(rows)
+    out = out.sort_values("Z-score", ascending=False).drop_duplicates("_pair_key").drop(columns=["_pair_key"])
+    out = out.head(topn).reset_index(drop=True)
     return out
 
 
@@ -610,10 +634,8 @@ def style_rv_table(df: pd.DataFrame):
     return sty
 
 
-def show_rv_pairs_table(
+def show_rv_pairs_table_from_matrix(
     df_bucket: pd.DataFrame,
-    last: pd.DataFrame,
-    z_col: str,
     tickers_sorted: list,
     asof: pd.Timestamp,
     window: int,
@@ -621,9 +643,16 @@ def show_rv_pairs_table(
 ):
     st.markdown("### Top 10 RV trades")
 
-    tbl = build_rv_pairs_table(df_bucket, last, z_col, tickers_sorted, asof, window, min_periods, topn=10)
+    tbl = build_rv_pairs_from_matrix_logic(
+        df_bucket=df_bucket,
+        tickers_sorted=tickers_sorted,
+        asof=asof,
+        window=window,
+        min_periods=min_periods,
+        topn=10,
+    )
     if tbl.empty:
-        st.info("Not enough data to build RV pair trades in this selection.")
+        st.info("Not enough data to build RV trades in this selection.")
         return
 
     tbl = tbl.reset_index(drop=True)
@@ -633,7 +662,172 @@ def show_rv_pairs_table(
         style_rv_table(tbl)
         .format({"Current Spread": "{:.2f}", "Average Spread": "{:.2f}", "Z-score": "{:.2f}"})
     )
+    st.table(sty)
 
+
+# -----------------------------
+# NEW: Single-bond RV finder (Top 10 trades for ONE bond)
+# - DOES NOT CHANGE EXISTING OUTPUTS
+# - Uses SAME matrix logic: spread = x - y
+# - Ranks by |Z|
+# -----------------------------
+def build_single_bond_rv_table(
+    df_bucket: pd.DataFrame,
+    tickers_sorted: list,
+    asof: pd.Timestamp,
+    window: int,
+    min_periods: int,
+    focus_ticker: str,
+    topn: int = 10,
+    focus_mode: str = "BUY",  # "BUY" or "SHORT"
+) -> pd.DataFrame:
+    """
+    Returns Top-N RV trades conditioned on the user's intent:
+
+    - focus_mode="BUY": selected bond must be the BUY leg -> show best SELL candidates against it
+    - focus_mode="SHORT": selected bond must be the SELL leg -> show best BUY candidates against it
+
+    Uses the SAME matrix logic: spread = x - y, z = (cur - mu)/sd.
+    """
+    if not focus_ticker or focus_ticker not in tickers_sorted:
+        return pd.DataFrame()
+
+    wide = (
+        df_bucket[df_bucket["date"] <= asof]
+        .pivot_table(index="date", columns="ticker", values="zspread", aggfunc="last")
+        .sort_index()
+    )
+
+    if focus_ticker not in wide.columns:
+        return pd.DataFrame()
+
+    focus_mode = str(focus_mode or "BUY").upper().strip()
+    if focus_mode not in {"BUY", "SHORT"}:
+        focus_mode = "BUY"
+
+    rows = []
+    x = focus_ticker
+
+    for y in tickers_sorted:
+        if y == x or y not in wide.columns:
+            continue
+
+        # SAME definition as matrix: spread = x - y
+        spread_ts = (wide[x] - wide[y]).dropna()
+        if spread_ts.shape[0] < min_periods:
+            continue
+
+        mu = spread_ts.rolling(window, min_periods=min_periods).mean().iloc[-1]
+        sd = spread_ts.rolling(window, min_periods=min_periods).std(ddof=0).iloc[-1]
+        cur = spread_ts.iloc[-1]
+
+        if pd.isna(mu) or pd.isna(sd) or sd == 0 or pd.isna(cur):
+            continue
+
+        z = float((cur - mu) / sd)
+        z_abs = abs(z)
+
+        # Rule for spread = x - y:
+        # z >= 0 => BUY x, SELL y
+        # z <  0 => SELL x, BUY y
+        if z >= 0:
+            buy, sell = x, y
+            # hover/table convention: show (Sell - Buy)
+            cur_sb = float(-cur)  # y - x
+            mu_sb = float(-mu)
+        else:
+            buy, sell = y, x
+            cur_sb = float(cur)   # x - y since Sell=x, Buy=y
+            mu_sb = float(mu)
+
+        # --- Filter by user's intent ---
+        if focus_mode == "BUY":
+            # only keep trades where selected bond is BUY leg
+            if buy != x:
+                continue
+        else:  # SHORT
+            # only keep trades where selected bond is SELL leg
+            if sell != x:
+                continue
+
+        rows.append(
+            {
+                "Buy": format_coupon_superscript(buy),
+                "Sell": format_coupon_superscript(sell),
+                "Current Spread": round(cur_sb, 2),
+                "Average Spread": round(mu_sb, 2),
+                "Z-score": round(z_abs, 2),
+            }
+        )
+
+    if not rows:
+        return pd.DataFrame()
+
+    out = (
+        pd.DataFrame(rows)
+        .sort_values("Z-score", ascending=False)
+        .head(topn)
+        .reset_index(drop=True)
+    )
+    return out
+
+
+def show_single_bond_rv_finder(
+    df_bucket: pd.DataFrame,
+    tickers_sorted: list,
+    asof: pd.Timestamp,
+    window: int,
+    min_periods: int,
+    key_prefix: str,
+):
+    st.markdown("### Single bond RV finder")
+
+    # Intent selector (buy vs short)
+    mode = st.radio(
+        "Trade intent",
+        options=["BUY", "SHORT"],
+        horizontal=True,
+        key=f"{key_prefix}_single_bond_mode",
+    )
+    focus_mode = "BUY" if mode.startswith("BUY") else "SHORT"
+
+    focus = st.selectbox(
+        "Type a bond ticker and press Enter",
+        options=[""] + tickers_sorted,
+        index=0,
+        format_func=lambda t: "" if t == "" else format_coupon_superscript(t),
+        key=f"{key_prefix}_single_bond_select",
+    )
+
+    if not focus:
+        st.caption("Select a bond to see its best RV trades under your chosen intent.")
+        return
+
+    tbl = build_single_bond_rv_table(
+        df_bucket=df_bucket,
+        tickers_sorted=tickers_sorted,
+        asof=asof,
+        window=window,
+        min_periods=min_periods,
+        focus_ticker=focus,
+        topn=10,
+        focus_mode=focus_mode,
+    )
+
+    if tbl.empty:
+        if focus_mode == "BUY":
+            st.info("No valid trades found where this bond is the BUY leg under current filters.")
+        else:
+            st.info("No valid trades found where this bond is the SELL leg under current filters.")
+        return
+
+    tbl = tbl.reset_index(drop=True)
+    tbl.index = np.arange(1, len(tbl) + 1)
+
+    sty = (
+        style_rv_table(tbl)
+        .format({"Current Spread": "{:.2f}", "Average Spread": "{:.2f}", "Z-score": "{:.2f}"})
+    )
     st.table(sty)
 
 
@@ -672,7 +866,7 @@ with st.expander("Parameters", expanded=False):
     winsor_p = st.slider("Winsor tail p", 0.0, 0.05, 0.01, step=0.005)
 
     st.markdown("#### Heatmap scale")
-    vmax = st.slider("Color scale (max |Z diff|)", 0.5, 6.0, 3.0, step=0.5)
+    vmax = st.slider("Color scale (max |Z|)", 0.5, 6.0, 3.0, step=0.5)
 
     try:
         df, meta = load_all(excel_path, sheet)
@@ -756,18 +950,20 @@ with tab_raw:
     st.markdown(f"### Raw Z-score — {bucket_choice}")
 
     df_bucket, meta_bucket, tickers_sorted = maturity_and_scope_filter(meta, df, asof, bucket_choice, scope_choice)
-
-    last = compute_raw_last(df_bucket, window, min_periods, min_obs, asof, winsor_p)
+    _ = compute_raw_last(df_bucket, window, min_periods, min_obs, asof, winsor_p)  # kept for compatibility
 
     mat, cd = pair_spread_z_matrix_directional_full(df_bucket, tickers_sorted, asof, window, min_periods)
     plotly_z_heatmap_directional(
-        mat, cd,
+        mat,
+        cd,
         title=f"Raw Z-score Matrix — {bucket_choice}",
         vmax=vmax,
         key=f"hm_raw_{scope_choice}_{bucket_choice}_{asof.date()}_{window}_{min_periods}_{min_obs}_{winsor_p}_{vmax}",
     )
 
-    show_rv_pairs_table(df_bucket, last, "raw_z", tickers_sorted, asof, window, min_periods)
+    show_rv_pairs_table_from_matrix(df_bucket, tickers_sorted, asof, window, min_periods)
+    show_single_bond_rv_finder(df_bucket, tickers_sorted, asof, window, min_periods, key_prefix="raw")
+
 
 # -----------------------------
 # Residual tab
@@ -777,18 +973,20 @@ with tab_resid:
     st.markdown(f"### Residual Z-score — {bucket_choice}")
 
     df_bucket, meta_bucket, tickers_sorted = maturity_and_scope_filter(meta, df, asof, bucket_choice, scope_choice)
-
-    last = compute_resid_last(df_bucket, window, min_periods, min_obs, asof, winsor_p)
+    _ = compute_resid_last(df_bucket, window, min_periods, min_obs, asof, winsor_p)  # kept for compatibility
 
     mat, cd = pair_spread_z_matrix_directional_full(df_bucket, tickers_sorted, asof, window, min_periods)
     plotly_z_heatmap_directional(
-        mat, cd,
+        mat,
+        cd,
         title=f"Residual Z-score Matrix — {bucket_choice}",
         vmax=vmax,
         key=f"hm_residual_{scope_choice}_{bucket_choice}_{asof.date()}_{window}_{min_periods}_{min_obs}_{winsor_p}_{vmax}",
     )
 
-    show_rv_pairs_table(df_bucket, last, "resid_z", tickers_sorted, asof, window, min_periods)
+    show_rv_pairs_table_from_matrix(df_bucket, tickers_sorted, asof, window, min_periods)
+    show_single_bond_rv_finder(df_bucket, tickers_sorted, asof, window, min_periods, key_prefix="resid")
+
 
 # -----------------------------
 # Cointegration proxy tab
@@ -797,19 +995,19 @@ with tab_coint:
     scope_choice, bucket_choice = header_row_with_filters("coint", default_bucket="5Y area", default_scope="ALL")
     st.markdown(f"### Cointegration Z-score — {bucket_choice} (proxy)")
 
-    st.info("Proxy mode: uses single-bond z-score differences (same format as Raw/Residual).")
+    st.info("Proxy mode: uses the same pair-spread Z logic & directional coloring.")
 
     df_bucket, meta_bucket, tickers_sorted = maturity_and_scope_filter(meta, df, asof, bucket_choice, scope_choice)
-
-    last = compute_raw_last(df_bucket, window, min_periods, min_obs, asof, winsor_p)
+    _ = compute_raw_last(df_bucket, window, min_periods, min_obs, asof, winsor_p)  # kept for compatibility
 
     mat, cd = pair_spread_z_matrix_directional_full(df_bucket, tickers_sorted, asof, window, min_periods)
     plotly_z_heatmap_directional(
-        mat, cd,
+        mat,
+        cd,
         title=f"Cointegration Z-score Matrix — {bucket_choice}",
         vmax=vmax,
         key=f"hm_cointegration_{scope_choice}_{bucket_choice}_{asof.date()}_{window}_{min_periods}_{min_obs}_{winsor_p}_{vmax}",
     )
 
-    show_rv_pairs_table(df_bucket, last, "raw_z", tickers_sorted, asof, window, min_periods)
-
+    show_rv_pairs_table_from_matrix(df_bucket, tickers_sorted, asof, window, min_periods)
+    show_single_bond_rv_finder(df_bucket, tickers_sorted, asof, window, min_periods, key_prefix="coint")
