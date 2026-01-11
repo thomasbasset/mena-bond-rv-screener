@@ -12,6 +12,7 @@ import plotly.graph_objects as go
 import plotly.express as px
 
 st.set_page_config(page_title="MENA Bond RV (Z-spreads)", layout="wide")
+st.cache_data.clear()
 
 st.markdown(
     """
@@ -1066,3 +1067,4 @@ with tab_coint:
         df_bucket, tickers_sorted, asof, window, min_periods, key_prefix="coint",
         scope_choice=scope_choice, bucket_choice=bucket_choice, mode="coint", winsor_p=winsor_p
     )
+
