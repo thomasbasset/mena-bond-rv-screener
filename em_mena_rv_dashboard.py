@@ -99,6 +99,7 @@ DATA_DIR = PROJECT_ROOT / "data"
 OUTPUTS_DIR = PROJECT_ROOT / "outputs"
 OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
 DEFAULT_EXCEL = DATA_DIR / "RV_Model_Raw_Data.xlsx"
+DEFAULT_SHEET = "Time_Series_Z_Spreads"
 
 SCOPE_MAP = {
     "ALL": None,
@@ -911,8 +912,8 @@ def load_all(excel_path: str, sheet: str):
 st.title("MENA Bonds RV Screener")
 
 with st.expander("Parameters", expanded=False):
-    excel_path = st.text_input("Excel file path", value=str(DEFAULT_EXCEL))
-    sheet = st.text_input("Sheet name", value="Time_Series_Z_Spreads")
+    excel_path = str(DEFAULT_EXCEL)
+    sheet = DEFAULT_SHEET
 
     st.markdown("#### Short-history params")
     window = st.slider("Rolling window (days)", 10, 120, 20, step=5)
@@ -948,7 +949,7 @@ with st.expander("Parameters", expanded=False):
 
 if "df" not in globals() or "meta" not in globals() or "asof" not in globals():
     excel_path = str(DEFAULT_EXCEL)
-    sheet = "Time_Series_Z_Spreads"
+    sheet = DEFAULT_SHEET
     window = 20
     min_periods = 10
     min_obs = 25
