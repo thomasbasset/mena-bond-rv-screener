@@ -12,7 +12,6 @@ import plotly.graph_objects as go
 import plotly.express as px
 
 st.set_page_config(page_title="MENA Bond RV (Z-spreads)", layout="wide")
-st.cache_data.clear()
 
 st.markdown(
     """
