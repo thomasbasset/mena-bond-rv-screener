@@ -465,11 +465,20 @@ def pair_spread_z_matrix_directional_full(
                     params = sm.OLS(yv, X).fit().params
                     a = float(params.get("const", 0.0))
                     b = float(params.get("y", 0.0))
+
                     resid_window = (yv - (a + b * w["y"].astype(float))).astype(float)
-                    cur_mu_sd_z = _pair_stats_from_spread(resid_window, window=window, min_periods=min_periods)
-                    if cur_mu_sd_z is None:
+                    z_stats = _pair_stats_from_spread(resid_window, window=window, min_periods=min_periods)
+                    if z_stats is None:
                         continue
-                    cur, mu, sd, z, z_abs = cur_mu_sd_z
+                    _, _, sd_resid, z, z_abs = z_stats
+
+                    spread_window = (w["x"].astype(float) - w["y"].astype(float)).astype(float)
+                    sp_stats = _pair_stats_from_spread(spread_window, window=window, min_periods=min_periods)
+                    if sp_stats is None:
+                        continue
+                    cur, mu, _, _, _ = sp_stats
+
+                    sd = float(sd_resid)
                 except Exception:
                     continue
             else:
@@ -591,11 +600,20 @@ def _iter_pairs_stats(
                     params = sm.OLS(yv, X).fit().params
                     a = float(params.get("const", 0.0))
                     b = float(params.get("y", 0.0))
+
                     resid_window = (yv - (a + b * w["y"].astype(float))).astype(float)
-                    cur_mu_sd_z = _pair_stats_from_spread(resid_window, window=window, min_periods=min_periods)
-                    if cur_mu_sd_z is None:
+                    z_stats = _pair_stats_from_spread(resid_window, window=window, min_periods=min_periods)
+                    if z_stats is None:
                         continue
-                    cur, mu, sd, z, z_abs = cur_mu_sd_z
+                    _, _, sd_resid, z, z_abs = z_stats
+
+                    spread_window = (w["x"].astype(float) - w["y"].astype(float)).astype(float)
+                    sp_stats = _pair_stats_from_spread(spread_window, window=window, min_periods=min_periods)
+                    if sp_stats is None:
+                        continue
+                    cur, mu, _, _, _ = sp_stats
+
+                    sd = float(sd_resid)
                 except Exception:
                     continue
             else:
@@ -1066,4 +1084,3 @@ with tab_coint:
         df_bucket, tickers_sorted, asof, window, min_periods, key_prefix="coint",
         scope_choice=scope_choice, bucket_choice=bucket_choice, mode="coint", winsor_p=winsor_p
     )
-
