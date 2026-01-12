@@ -298,10 +298,6 @@ def winsorize_series(s: pd.Series, p: float = 0.01) -> pd.Series:
     return s.clip(lower=lo, upper=hi)
 
 
-def last_per_ticker(df: pd.DataFrame) -> pd.DataFrame:
-    return df.sort_values("date").groupby("ticker").tail(1)
-
-
 def ytm_years(maturity: pd.Timestamp, asof: pd.Timestamp) -> float:
     return (pd.to_datetime(maturity) - pd.to_datetime(asof)).days / 365.25
 
@@ -315,9 +311,7 @@ MAT_BUCKETS = {
 }
 
 
-def maturity_and_scope_filter(
-    meta: pd.DataFrame, df: pd.DataFrame, asof: pd.Timestamp, bucket_name: str, scope_choice: str
-):
+def maturity_and_scope_filter(meta: pd.DataFrame, df: pd.DataFrame, asof: pd.Timestamp, bucket_name: str, scope_choice: str):
     lo, hi = MAT_BUCKETS[bucket_name]
     m = meta.dropna(subset=["maturity"]).copy()
 
@@ -340,13 +334,7 @@ def build_wide_series(df_bucket: pd.DataFrame, asof: pd.Timestamp, value_col: st
     return wide
 
 
-def build_residualized_series(
-    df_bucket: pd.DataFrame,
-    asof: pd.Timestamp,
-    window: int,
-    min_periods: int,
-    winsor_p: float,
-) -> pd.DataFrame:
+def build_residualized_series(df_bucket: pd.DataFrame, asof: pd.Timestamp, window: int, min_periods: int, winsor_p: float) -> pd.DataFrame:
     d = df_bucket[df_bucket["date"] <= asof].copy()
     d["zspread_w"] = d.groupby("ticker")["zspread"].transform(lambda x: winsorize_series(x, p=winsor_p))
 
@@ -371,10 +359,7 @@ def build_residualized_series(
         except Exception:
             continue
 
-    wide_resid = (
-        d.pivot_table(index="date", columns="ticker", values="resid", aggfunc="last")
-        .sort_index()
-    )
+    wide_resid = d.pivot_table(index="date", columns="ticker", values="resid", aggfunc="last").sort_index()
     return wide_resid
 
 
@@ -425,10 +410,10 @@ def pair_spread_z_matrix_directional_full(
 
     mode = (mode or "raw").lower().strip()
 
+    wide_raw = build_wide_series(df_bucket, asof, "zspread")
+    wide_resid = None
     if mode == "resid":
-        wide = build_residualized_series(df_bucket, asof, window, min_periods, winsor_p)
-    else:
-        wide = build_wide_series(df_bucket, asof, "zspread")
+        wide_resid = build_residualized_series(df_bucket, asof, window, min_periods, winsor_p)
 
     M = np.full((n, n), np.nan, dtype=float)
     CD = np.empty((n, n), dtype=object)
@@ -438,22 +423,31 @@ def pair_spread_z_matrix_directional_full(
 
     for i in range(n):
         x = tickers_sorted[i]
-        if x not in wide.columns:
+        if x not in wide_raw.columns:
             continue
 
         for j in range(i + 1, n):
             y = tickers_sorted[j]
-            if y not in wide.columns:
+            if y not in wide_raw.columns:
                 continue
 
-            sx = wide[x].dropna()
-            sy = wide[y].dropna()
-            idx = sx.index.intersection(sy.index)
+            sx_raw = wide_raw[x].dropna()
+            sy_raw = wide_raw[y].dropna()
+
+            if mode == "resid":
+                if wide_resid is None or x not in wide_resid.columns or y not in wide_resid.columns:
+                    continue
+                sx_sig = wide_resid[x].dropna()
+                sy_sig = wide_resid[y].dropna()
+                idx = sx_raw.index.intersection(sy_raw.index).intersection(sx_sig.index).intersection(sy_sig.index)
+            else:
+                idx = sx_raw.index.intersection(sy_raw.index)
+
             if idx.shape[0] < min_periods:
                 continue
 
             if mode == "coint":
-                sub = pd.DataFrame({"x": sx.loc[idx], "y": sy.loc[idx]}).dropna()
+                sub = pd.DataFrame({"x": sx_raw.loc[idx], "y": sy_raw.loc[idx]}).dropna()
                 if sub.shape[0] < min_periods:
                     continue
                 w = sub.iloc[-window:] if sub.shape[0] >= window else sub
@@ -481,9 +475,25 @@ def pair_spread_z_matrix_directional_full(
                     sd = float(sd_resid)
                 except Exception:
                     continue
+
+            elif mode == "resid":
+                spread_sig = (sx_sig.loc[idx] - sy_sig.loc[idx]).astype(float)
+                z_stats = _pair_stats_from_spread(spread_sig, window=window, min_periods=min_periods)
+                if z_stats is None:
+                    continue
+                _, _, sd_sig, z, z_abs = z_stats
+
+                spread_raw = (sx_raw.loc[idx] - sy_raw.loc[idx]).astype(float)
+                sp_stats = _pair_stats_from_spread(spread_raw, window=window, min_periods=min_periods)
+                if sp_stats is None:
+                    continue
+                cur, mu, _, _, _ = sp_stats
+
+                sd = float(sd_sig)
+
             else:
-                spread_ts = (sx.loc[idx] - sy.loc[idx]).astype(float)
-                cur_mu_sd_z = _pair_stats_from_spread(spread_ts, window=window, min_periods=min_periods)
+                spread_raw = (sx_raw.loc[idx] - sy_raw.loc[idx]).astype(float)
+                cur_mu_sd_z = _pair_stats_from_spread(spread_raw, window=window, min_periods=min_periods)
                 if cur_mu_sd_z is None:
                     continue
                 cur, mu, sd, z, z_abs = cur_mu_sd_z
@@ -566,29 +576,39 @@ def _iter_pairs_stats(
     winsor_p: float,
 ):
     mode = (mode or "raw").lower().strip()
+
+    wide_raw = build_wide_series(df_bucket, asof, "zspread")
+    wide_resid = None
     if mode == "resid":
-        wide = build_residualized_series(df_bucket, asof, window, min_periods, winsor_p)
-    else:
-        wide = build_wide_series(df_bucket, asof, "zspread")
+        wide_resid = build_residualized_series(df_bucket, asof, window, min_periods, winsor_p)
 
     n = len(tickers_sorted)
     for i in range(n):
         x = tickers_sorted[i]
-        if x not in wide.columns:
+        if x not in wide_raw.columns:
             continue
         for j in range(i + 1, n):
             y = tickers_sorted[j]
-            if y not in wide.columns:
+            if y not in wide_raw.columns:
                 continue
 
-            sx = wide[x].dropna()
-            sy = wide[y].dropna()
-            idx = sx.index.intersection(sy.index)
+            sx_raw = wide_raw[x].dropna()
+            sy_raw = wide_raw[y].dropna()
+
+            if mode == "resid":
+                if wide_resid is None or x not in wide_resid.columns or y not in wide_resid.columns:
+                    continue
+                sx_sig = wide_resid[x].dropna()
+                sy_sig = wide_resid[y].dropna()
+                idx = sx_raw.index.intersection(sy_raw.index).intersection(sx_sig.index).intersection(sy_sig.index)
+            else:
+                idx = sx_raw.index.intersection(sy_raw.index)
+
             if idx.shape[0] < min_periods:
                 continue
 
             if mode == "coint":
-                sub = pd.DataFrame({"x": sx.loc[idx], "y": sy.loc[idx]}).dropna()
+                sub = pd.DataFrame({"x": sx_raw.loc[idx], "y": sy_raw.loc[idx]}).dropna()
                 if sub.shape[0] < min_periods:
                     continue
                 w = sub.iloc[-window:] if sub.shape[0] >= window else sub
@@ -616,9 +636,25 @@ def _iter_pairs_stats(
                     sd = float(sd_resid)
                 except Exception:
                     continue
+
+            elif mode == "resid":
+                spread_sig = (sx_sig.loc[idx] - sy_sig.loc[idx]).astype(float)
+                z_stats = _pair_stats_from_spread(spread_sig, window=window, min_periods=min_periods)
+                if z_stats is None:
+                    continue
+                _, _, sd_sig, z, z_abs = z_stats
+
+                spread_raw = (sx_raw.loc[idx] - sy_raw.loc[idx]).astype(float)
+                sp_stats = _pair_stats_from_spread(spread_raw, window=window, min_periods=min_periods)
+                if sp_stats is None:
+                    continue
+                cur, mu, _, _, _ = sp_stats
+
+                sd = float(sd_sig)
+
             else:
-                spread_ts = (sx.loc[idx] - sy.loc[idx]).astype(float)
-                cur_mu_sd_z = _pair_stats_from_spread(spread_ts, window=window, min_periods=min_periods)
+                spread_raw = (sx_raw.loc[idx] - sy_raw.loc[idx]).astype(float)
+                cur_mu_sd_z = _pair_stats_from_spread(spread_raw, window=window, min_periods=min_periods)
                 if cur_mu_sd_z is None:
                     continue
                 cur, mu, sd, z, z_abs = cur_mu_sd_z
@@ -711,12 +747,7 @@ def build_single_bond_rv_table(
     if not rows:
         return pd.DataFrame()
 
-    return (
-        pd.DataFrame(rows)
-        .sort_values("Z-score", ascending=False)
-        .head(topn)
-        .reset_index(drop=True)
-    )
+    return pd.DataFrame(rows).sort_values("Z-score", ascending=False).head(topn).reset_index(drop=True)
 
 
 def style_rv_table(df: pd.DataFrame):
@@ -815,9 +846,7 @@ def show_rv_pairs_table_from_matrix(
     tbl = tbl.reset_index(drop=True)
     tbl.index = np.arange(1, len(tbl) + 1)
 
-    sty = style_rv_table(tbl).format(
-        {"Current Spread": "{:.2f}", "Average Spread": "{:.2f}", "Z-score": "{:.2f}"}
-    )
+    sty = style_rv_table(tbl).format({"Current Spread": "{:.2f}", "Average Spread": "{:.2f}", "Z-score": "{:.2f}"})
     st.table(sty)
     st.markdown("</div>", unsafe_allow_html=True)
 
@@ -907,9 +936,7 @@ def show_single_bond_rv_finder(
     tbl = tbl.reset_index(drop=True)
     tbl.index = np.arange(1, len(tbl) + 1)
 
-    sty = style_rv_table(tbl).format(
-        {"Current Spread": "{:.2f}", "Average Spread": "{:.2f}", "Z-score": "{:.2f}"}
-    )
+    sty = style_rv_table(tbl).format({"Current Spread": "{:.2f}", "Average Spread": "{:.2f}", "Z-score": "{:.2f}"})
     st.table(sty)
     st.markdown("</div>", unsafe_allow_html=True)
 
@@ -1014,9 +1041,7 @@ with tab_raw:
 
     df_bucket, meta_bucket, tickers_sorted = maturity_and_scope_filter(meta, df, asof, bucket_choice, scope_choice)
 
-    mat, cd = pair_spread_z_matrix_directional_full(
-        df_bucket, tickers_sorted, asof, window, min_periods, mode="raw", winsor_p=winsor_p
-    )
+    mat, cd = pair_spread_z_matrix_directional_full(df_bucket, tickers_sorted, asof, window, min_periods, mode="raw", winsor_p=winsor_p)
     plotly_z_heatmap_directional(
         mat,
         cd,
@@ -1025,13 +1050,8 @@ with tab_raw:
         key=f"hm_raw_{scope_choice}_{bucket_choice}_{asof.date()}_{window}_{min_periods}_{winsor_p}_{vmax}",
     )
 
-    show_rv_pairs_table_from_matrix(
-        df_bucket, tickers_sorted, asof, window, min_periods, scope_choice, bucket_choice, mode="raw", winsor_p=winsor_p
-    )
-    show_single_bond_rv_finder(
-        df_bucket, tickers_sorted, asof, window, min_periods, key_prefix="raw",
-        scope_choice=scope_choice, bucket_choice=bucket_choice, mode="raw", winsor_p=winsor_p
-    )
+    show_rv_pairs_table_from_matrix(df_bucket, tickers_sorted, asof, window, min_periods, scope_choice, bucket_choice, mode="raw", winsor_p=winsor_p)
+    show_single_bond_rv_finder(df_bucket, tickers_sorted, asof, window, min_periods, key_prefix="raw", scope_choice=scope_choice, bucket_choice=bucket_choice, mode="raw", winsor_p=winsor_p)
 
 
 with tab_resid:
@@ -1040,9 +1060,7 @@ with tab_resid:
 
     df_bucket, meta_bucket, tickers_sorted = maturity_and_scope_filter(meta, df, asof, bucket_choice, scope_choice)
 
-    mat, cd = pair_spread_z_matrix_directional_full(
-        df_bucket, tickers_sorted, asof, window, min_periods, mode="resid", winsor_p=winsor_p
-    )
+    mat, cd = pair_spread_z_matrix_directional_full(df_bucket, tickers_sorted, asof, window, min_periods, mode="resid", winsor_p=winsor_p)
     plotly_z_heatmap_directional(
         mat,
         cd,
@@ -1051,13 +1069,8 @@ with tab_resid:
         key=f"hm_resid_{scope_choice}_{bucket_choice}_{asof.date()}_{window}_{min_periods}_{winsor_p}_{vmax}",
     )
 
-    show_rv_pairs_table_from_matrix(
-        df_bucket, tickers_sorted, asof, window, min_periods, scope_choice, bucket_choice, mode="resid", winsor_p=winsor_p
-    )
-    show_single_bond_rv_finder(
-        df_bucket, tickers_sorted, asof, window, min_periods, key_prefix="resid",
-        scope_choice=scope_choice, bucket_choice=bucket_choice, mode="resid", winsor_p=winsor_p
-    )
+    show_rv_pairs_table_from_matrix(df_bucket, tickers_sorted, asof, window, min_periods, scope_choice, bucket_choice, mode="resid", winsor_p=winsor_p)
+    show_single_bond_rv_finder(df_bucket, tickers_sorted, asof, window, min_periods, key_prefix="resid", scope_choice=scope_choice, bucket_choice=bucket_choice, mode="resid", winsor_p=winsor_p)
 
 
 with tab_coint:
@@ -1066,9 +1079,7 @@ with tab_coint:
 
     df_bucket, meta_bucket, tickers_sorted = maturity_and_scope_filter(meta, df, asof, bucket_choice, scope_choice)
 
-    mat, cd = pair_spread_z_matrix_directional_full(
-        df_bucket, tickers_sorted, asof, window, min_periods, mode="coint", winsor_p=winsor_p
-    )
+    mat, cd = pair_spread_z_matrix_directional_full(df_bucket, tickers_sorted, asof, window, min_periods, mode="coint", winsor_p=winsor_p)
     plotly_z_heatmap_directional(
         mat,
         cd,
@@ -1077,10 +1088,5 @@ with tab_coint:
         key=f"hm_coint_{scope_choice}_{bucket_choice}_{asof.date()}_{window}_{min_periods}_{winsor_p}_{vmax}",
     )
 
-    show_rv_pairs_table_from_matrix(
-        df_bucket, tickers_sorted, asof, window, min_periods, scope_choice, bucket_choice, mode="coint", winsor_p=winsor_p
-    )
-    show_single_bond_rv_finder(
-        df_bucket, tickers_sorted, asof, window, min_periods, key_prefix="coint",
-        scope_choice=scope_choice, bucket_choice=bucket_choice, mode="coint", winsor_p=winsor_p
-    )
+    show_rv_pairs_table_from_matrix(df_bucket, tickers_sorted, asof, window, min_periods, scope_choice, bucket_choice, mode="coint", winsor_p=winsor_p)
+    show_single_bond_rv_finder(df_bucket, tickers_sorted, asof, window, min_periods, key_prefix="coint", scope_choice=scope_choice, bucket_choice=bucket_choice, mode="coint", winsor_p=winsor_p)
